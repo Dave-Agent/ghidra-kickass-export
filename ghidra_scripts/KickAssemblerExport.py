@@ -42,10 +42,10 @@ class KickAssemblerExporter:
         default_path = "~/ghidra_kick_assembler_exports/src"
         # default_path = "C64Projects/Monty_Decomp/Monty_Source/src"
         self.OUTPUT_PATH = state.getTool().getOptions(options_name).getString("LastOutputPath", default_path)
-        self.OUTPUT_PATH = state.getTool().getOptions(options_name).getString("LastOutputPath", default_path)
 
         # Configuration
         self.COMMENT_COLUMN = 40  # Starting column for EOL comments in main ASM file
+        self.EOL_COMMENT_COLUMN = 75  # Starting column for user EOL comments in main ASM file
         self.SYMBOL_COMMENT_COLUMN = 50 # Starting column for comments in Symbols file
         self.MAX_RAW_BYTES_PER_LINE = 16 # Max bytes per .byte line for undefined data
         # self.OUTPUT_PATH = "C64Projects/Monty_Decomp/Monty_Source/src"
@@ -607,8 +607,8 @@ class KickAssemblerExporter:
                      file_handle.write("{}// {}{}\n".format(indent, p, line))
 
         # Write the comments if they exist (ABOVE the instruction)
-        write_multi_line_comment("PLATE: ", plate_comment, f, comment_indent)
-        write_multi_line_comment("PRE:   ", pre_comment, f, comment_indent)
+        write_multi_line_comment("", plate_comment, f, comment_indent)
+        write_multi_line_comment("", pre_comment, f, comment_indent)
 
         mnemonic = instruction.getMnemonicString().lower() # Use lowercase mnemonics
 
@@ -773,20 +773,42 @@ class KickAssemblerExporter:
         # --- Format and Write Output Line ---
         instruction_text = "  {}".format(kick_disasm) # Indent instruction
 
-        # Prepare EOL comment: [ADDR:BYTES GHIDRA_ASM] ; GHIDRA_EOL_COMMENT
+        EOL_COMMENT_COLUMN = self.EOL_COMMENT_COLUMN
+
+        # Prepare Ghidra-generated part of the comment
         bytes_str = " ".join(bytes_list)
         MAX_BYTES_WIDTH = 8 # Fixed width for byte display in comment
         padded_bytes_str = "{:<{}}".format(bytes_str, MAX_BYTES_WIDTH)
-        eol_comment = self.listing.getComment(CodeUnit.EOL_COMMENT, address) # Get user EOL comment
         main_comment_content = "[{}:{} {}]".format(norm_addr_str, padded_bytes_str, original_asm_for_comment)
-        full_comment_content = main_comment_content + (" ; {}".format(eol_comment) if eol_comment else "")
 
-        # Calculate padding to align the comment column
-        padding_len = self.COMMENT_COLUMN - len(instruction_text) - 2 # -2 for "//"
-        padding = " " * max(1, padding_len) # Ensure at least one space
+        # Get the user's EOL comment from Ghidra
+        eol_comment = self.listing.getComment(CodeUnit.EOL_COMMENT, address)
 
-        # Write the assembly line with its aligned comment
-        f.write("{}{}{} {}\n".format(instruction_text, padding, "//", full_comment_content))
+        # Calculate padding to align the main comment part (the "// [ADDR...]")
+        padding1_len = self.COMMENT_COLUMN - len(instruction_text) - 2 # -2 for "//"
+        padding1 = " " * max(1, padding1_len)
+
+        # Assemble the first part of the line (instruction + main comment)
+        line_so_far = "{}{}// {}".format(instruction_text, padding1, main_comment_content)
+
+        # If a user EOL comment exists, calculate its padding and append it
+        if eol_comment:
+            # Current length of the line. Column numbers are 1-based, len() is 0-based.
+            current_len = len(line_so_far)
+
+            # If the line is already past the target, just add a single space
+            if current_len >= (EOL_COMMENT_COLUMN - 1):
+                padding2 = " "
+            # Otherwise, calculate padding to reach the target column
+            else:
+                padding2_len = (EOL_COMMENT_COLUMN - 1) - current_len
+                padding2 = " " * padding2_len
+
+            # Append the EOL comment with its padding (no more semi-colon)
+            line_so_far += "{}{}".format(padding2, eol_comment)
+
+        # Write the final assembled line to the file
+        f.write(line_so_far + "\n")
 
         # --- Handle POST Comments (Below the instruction) ---
         post_comment = self.listing.getComment(CodeUnit.POST_COMMENT, address)
