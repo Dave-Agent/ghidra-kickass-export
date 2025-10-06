@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Ghidra Script to Export Disassembly to Kick Assembler Format
 # Includes symbol/label handling, XREFs in code and symbol file,
 # comment preservation, improved formatting, and unified byte/code processing.
@@ -16,12 +15,12 @@ from ghidra.program.model.address import Address, AddressOutOfBoundsException
 from ghidra.util.exception import CancelledException
 from ghidra.framework.preferences import Preferences 
 from ghidra.program.model.scalar import Scalar
-import ghidra # Required for isinstance checks
+import ghidra 
 
 import os
 import datetime
 import re
-import traceback # For error reporting
+import traceback 
 
 # --- Exporter Class ---
 class KickAssemblerExporter:
@@ -40,7 +39,6 @@ class KickAssemblerExporter:
 
         options_name = "KickAssemblerExport"
         default_path = "~/ghidra_kick_assembler_exports/src"
-        # default_path = "C64Projects/Monty_Decomp/Monty_Source/src"
         self.OUTPUT_PATH = state.getTool().getOptions(options_name).getString("LastOutputPath", default_path)
 
         # Configuration
@@ -48,7 +46,6 @@ class KickAssemblerExporter:
         self.EOL_COMMENT_COLUMN = 75  # Starting column for user EOL comments in main ASM file
         self.SYMBOL_COMMENT_COLUMN = 50 # Starting column for comments in Symbols file
         self.MAX_RAW_BYTES_PER_LINE = 16 # Max bytes per .byte line for undefined data
-        # self.OUTPUT_PATH = "C64Projects/Monty_Decomp/Monty_Source/src"
 
         # Internal Maps (built during export)
         self.address_to_label = {} # Map of normalized address string -> primary label name
@@ -89,7 +86,6 @@ class KickAssemblerExporter:
 
     def build_output_paths(self):
         """Create output directory and return filenames"""
-        #output_dir = os.path.join(os.path.expanduser("~"), "ghidra_outputs")
         output_dir = os.path.join(os.path.expanduser("~"), self.OUTPUT_PATH)
         if not os.path.exists(output_dir):
             try:
@@ -126,7 +122,6 @@ class KickAssemblerExporter:
             # address is outside Ghidra's defined memory map.
             # This ensures user symbols (like RAM variables) are always included.
             if not is_user_symbol and not is_in_memory:
-                # Optional Debug:
                 # print("Debug build_symbol_map: Skipping non-user symbol {} at {} (outside defined memory)".format(symbol.getName(), address_obj))
                 continue
 
@@ -143,7 +138,7 @@ class KickAssemblerExporter:
             # Prioritization: User Label > Function > Other User > Default (like DAT_)
             # This priority helps decide which symbol name to use if multiple exist at the same address.
             if s_src != 0 and stype == SymbolType.LABEL: new_priority = 3  # User Label
-            elif stype == SymbolType.FUNCTION: new_priority = 2           # Function
+            elif stype == SymbolType.FUNCTION: new_priority = 2            # Function
             elif s_src != 0: new_priority = 1                              # Other User Symbol
             else: new_priority = 0                                         # Default source symbol (DAT_, etc.)
 
@@ -185,7 +180,6 @@ class KickAssemblerExporter:
             is_func = symbol.getSymbolType() == SymbolType.FUNCTION
 
             # Only add labels potentially used for code flow (operands) here
-            # Let's stick to the original intent: User labels or Functions
             if (is_label and symbol.getSource() != 0) or is_func:
                 norm_addr = self.normalize_address(address_obj)
                 if not norm_addr: continue
@@ -309,7 +303,6 @@ class KickAssemblerExporter:
         if 32 <= byte_value <= 95:
              try: return chr(byte_value)
              except ValueError: return '.'
-        # One day: Add other specific common codes if needed (e.g., £=92)
         else:
             return '.' # Placeholder for control codes, graphics, etc.
 
@@ -604,9 +597,13 @@ class KickAssemblerExporter:
                  for i, line in enumerate(lines):
                      # Use prefix only for the first line of the comment type
                      p = prefix if i == 0 else " " * len(prefix)
-                     file_handle.write("{}// {}{}\n".format(indent, p, line))
+                     # Remove non-ASCII characters
+                     safe_line = line.encode('ascii', 'ignore').decode('ascii')
+                     file_handle.write("{}// {}{}\n".format(indent, p, safe_line))
 
         # Write the comments if they exist (ABOVE the instruction)
+        if plate_comment:
+            f.write("\n") # Add a blank line before the plate comment
         write_multi_line_comment("", plate_comment, f, comment_indent)
         write_multi_line_comment("", pre_comment, f, comment_indent)
 
@@ -791,36 +788,49 @@ class KickAssemblerExporter:
         # Assemble the first part of the line (instruction + main comment)
         line_so_far = "{}{}// {}".format(instruction_text, padding1, main_comment_content)
 
-        # If a user EOL comment exists, calculate its padding and append it
-        if eol_comment:
-            # Current length of the line. Column numbers are 1-based, len() is 0-based.
-            current_len = len(line_so_far)
+        # Handle multi-line EOL comments correctly.
+        if not eol_comment:
+            # If no user comment, just write the line and return.
+            f.write(line_so_far + "\n")
+        else:
+            # If there is a user comment, split it into lines and sanitize.
+            comment_lines = eol_comment.splitlines()
+            comment_lines = [line.encode('ascii', 'ignore').decode('ascii') for line in comment_lines]
 
-            # If the line is already past the target, just add a single space
-            if current_len >= (EOL_COMMENT_COLUMN - 1):
+            # Calculate padding for the first line of the user comment.
+            current_len = len(line_so_far)
+            if current_len >= (self.EOL_COMMENT_COLUMN - 1):
                 padding2 = " "
-            # Otherwise, calculate padding to reach the target column
             else:
-                padding2_len = (EOL_COMMENT_COLUMN - 1) - current_len
+                padding2_len = (self.EOL_COMMENT_COLUMN - 1) - current_len
                 padding2 = " " * padding2_len
 
-            # Append the EOL comment with its padding (no more semi-colon)
-            line_so_far += "{}{}".format(padding2, eol_comment)
+            # Append the first comment line and write the full instruction line.
+            line_so_far += "{}{}".format(padding2, comment_lines[0].strip())
+            f.write(line_so_far + "\n")
 
-        # Write the final assembled line to the file
-        f.write(line_so_far + "\n")
+            # If there are more comment lines, write them on subsequent lines, indented.
+            if len(comment_lines) > 1:
+                # Build a prefix to align the '//' and the text to the correct columns.
+                
+                # Part 1: Pad to align the '//' to the main comment column.
+                # (Column is 1-based, so subtract 1 for string index)
+                prefix_part1 = " " * (self.COMMENT_COLUMN - 2) + "//"
+                
+                # Part 2: Pad from the end of part 1 to align the text to the EOL comment column.
+                padding_len = (self.EOL_COMMENT_COLUMN - 1) - len(prefix_part1) + 2
+                prefix_part2 = " " * max(1, padding_len)
+                
+                # Combine to form the full prefix for each subsequent line.
+                line_prefix = prefix_part1 + prefix_part2
+
+                for extra_line in comment_lines[1:]:
+                    f.write("{}{}\n".format(line_prefix, extra_line.strip()))
 
         # --- Handle POST Comments (Below the instruction) ---
         post_comment = self.listing.getComment(CodeUnit.POST_COMMENT, address)
         # Write POST comment below if it exists
         write_multi_line_comment("POST:  ", post_comment, f, comment_indent)
-
-
-    def process_data_byte(self, address, f):
-        """Deprecated - Data processing is now handled by the unified loop's byte buffer."""
-        # This function remains for reference but isn't called by the current export logic.
-        # The unified loop uses flush_raw_bytes for both defined and undefined data.
-        pass
 
 
     # --- Main Export Orchestration (NEW UNIFIED LOGIC) ---
