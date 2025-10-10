@@ -928,6 +928,33 @@ class KickAssemblerExporter:
                                 else:
                                     f.write("// Warning: Skipped invalid sanitized label for '{}' at {}\n".format(label, current_address))
 
+                        # --- 1.5. Check for Plate/Pre Comments at current address (for non-instruction addresses) ---
+                        # Note: Instructions handle their own plate/pre comments in process_instruction()
+                        code_unit_check = self.listing.getCodeUnitAt(current_address)
+                        if not isinstance(code_unit_check, Instruction):
+                            # Only check for comments if this isn't an instruction (to avoid duplication)
+                            plate_comment = self.listing.getComment(CodeUnit.PLATE_COMMENT, current_address)
+                            pre_comment = self.listing.getComment(CodeUnit.PRE_COMMENT, current_address)
+                            
+                            if plate_comment or pre_comment:
+                                # Flush raw bytes before writing comments
+                                if self.flush_raw_bytes(raw_byte_buffer, buffer_start_address, f):
+                                    raw_byte_buffer = [] ; buffer_start_address = None
+                                
+                                comment_indent = "  "
+                                
+                                # Helper function for multi-line comments (reuse from process_instruction)
+                                def write_multi_line_comment_local(prefix, comment, file_handle, indent):
+                                    if comment:
+                                        f.write("\n")  # Blank line before plate comment
+                                        lines = comment.splitlines()
+                                        for i, line in enumerate(lines):
+                                            p = prefix if i == 0 else " " * len(prefix)
+                                            safe_line = line.encode('ascii', 'ignore').decode('ascii')
+                                            file_handle.write("{}// {}{}\n".format(indent, p, safe_line))
+                                
+                                write_multi_line_comment_local("", plate_comment, f, comment_indent)
+                                write_multi_line_comment_local("", pre_comment, f, comment_indent)
 
                         # --- 2. Determine what's at the current address ---
                         code_unit = self.listing.getCodeUnitAt(current_address)
