@@ -84,10 +84,6 @@ start:
 
 ## Configuration
 
-The script prompts for an output directory on first run:
-
-![Configuration Dialog](docs/images/provide_path.png)
-
 **Default locations:**
 
 - Main files: `~/ghidra_kick_assembler_exports/src/`

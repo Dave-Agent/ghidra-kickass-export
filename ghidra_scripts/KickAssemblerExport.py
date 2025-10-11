@@ -842,13 +842,32 @@ class KickAssemblerExporter:
         # --- PROMPT USER FOR PATH AND SAVE PREFERENCE ---
         options_name = "KickAssemblerExport"
         try:
-            new_path = askString(
-                "Set Export Path",
-                "Enter the output path (relative to your home dir):",
-                self.OUTPUT_PATH # This is now the last-used path
-            )
-            self.OUTPUT_PATH = new_path
-
+            from java.io import File
+    
+            # Set initial directory to last used path (or default)
+            initial_dir = os.path.expanduser(os.path.join("~", self.OUTPUT_PATH))
+            if not os.path.exists(initial_dir):
+                initial_dir = os.path.expanduser("~")
+            
+            # Use askDirectory to select export directory
+            selected_dir = askDirectory("Select Export Directory", "Choose:")
+            
+            if selected_dir is None:
+                print("User cancelled the export.")
+                return
+            
+            # Convert selected directory to relative path from home dir
+            selected_path = selected_dir.getAbsolutePath()
+            home_dir = os.path.expanduser("~")
+            
+            if selected_path.startswith(home_dir):
+                # Make it relative to home directory
+                relative_path = os.path.relpath(selected_path, home_dir)
+                self.OUTPUT_PATH = relative_path
+            else:
+                # Use absolute path if outside home directory
+                self.OUTPUT_PATH = selected_path
+            
             # Save the new path back to Ghidra's preferences for the next session
             state.getTool().getOptions(options_name).setString("LastOutputPath", self.OUTPUT_PATH)
             print("Export path set to: {}".format(self.OUTPUT_PATH))
