@@ -24,6 +24,21 @@ import traceback
 
 # --- Exporter Class ---
 class KickAssemblerExporter:
+
+    # 6502/6510 mnemonics that have a zero-page form for each index mode.
+    # When an instruction is 3 bytes but its address is in $0000-$00FF,
+    # KickAss would silently assemble the shorter zero-page form instead —
+    # breaking byte-exactness. We add .abs to prevent that.
+    # Mnemonics absent from a mode (e.g. jsr, jmp, sta/lda with ,y) have
+    # no zero-page equivalent so KickAss uses absolute anyway; no .abs needed.
+    ZP_CAPABLE = {
+        '':   {'adc','and','asl','bit','cmp','cpx','cpy','dec','eor',
+               'inc','lda','ldx','ldy','lsr','ora','rol','ror','sbc','sta','stx','sty'},
+        ',x': {'adc','and','asl','cmp','dec','eor','inc','lda','ldy',
+               'lsr','ora','rol','ror','sbc','sta','sty'},
+        ',y': {'ldx','stx'},   # only these two have a zero-page,Y form
+    }
+
     def __init__(self, currentProgram):
         """Initialize the exporter with the current Ghidra program."""
         self.program = currentProgram
@@ -629,6 +644,7 @@ class KickAssemblerExporter:
         else:
             # --- Process Operands (Non-Accumulator Mode) ---
             num_operands = instruction.getNumOperands()
+            index_suffix = ""
             for i in range(num_operands):
                 op_str = None # The final string for this operand
                 op_objects = instruction.getOpObjects(i)
@@ -677,83 +693,110 @@ class KickAssemblerExporter:
                     # Operand string was already set (likely an immediate value)
                     pass
                 else:
-                    # --- Fallback Logic (using regex on default representation) ---
-                    # This runs if getOpObjects didn't yield a usable Address/symbol or Scalar
-                    symbol_in_fallback = None
+                    # --- NEW Logic: Handle LABEL+OFFSET or LABEL-OFFSET (Fallback) ---
+                    # Match: LABEL [+/-] VALUE (e.g., LAB_0aa2+2, LAB_4000-1)
+                    # Ghidra often gives a fully calculated address in the operand object,
+                    # but the default string representation (default_op_rep) may still show the original formula.
+                    offset_match = re.match(r'^([A-Za-z0-9_@.]+)\s*([+-])\s*(\$?(?:0x)?([0-9A-Fa-f]+))$', default_op_rep, re.IGNORECASE)
                     op_str_built = False # Flag to track if op_str was successfully built here
-                    # Regex patterns to parse common 6502 addressing modes from Ghidra's string output
-                    indirect_match_y = re.match(r'\(\$?(?:0x)?([0-9A-Fa-f]+)\),Y$', default_op_rep, re.IGNORECASE) # ($HH),Y
-                    indirect_match_x = re.match(r'\(\$?(?:0x)?([0-9A-Fa-f]+),X\)$', default_op_rep, re.IGNORECASE) # ($HH,X)
-                    absolute_match_xy = re.match(r'\$?(?:0x)?([0-9A-Fa-f]+),(X|Y)$', default_op_rep, re.IGNORECASE) # $HHHH,X or $HHHH,Y
-                    absolute_match_plain = re.match(r'\$?(?:0x)?([0-9A-Fa-f]+)$', default_op_rep, re.IGNORECASE)   # $HHHH
-                    addr_hex, norm_addr = None, None # Extracted hex string and normalized version
-
-                    if indirect_match_y:
-                        addr_hex = indirect_match_y.group(1); norm_addr = self.normalize_address_from_string(addr_hex)
-                        # Try to find a symbol for the zero-page address
-                        if norm_addr:
-                            if norm_addr in self.address_to_label: symbol_in_fallback = self.address_to_label[norm_addr]
-                            elif norm_addr in self.symbol_map: symbol_in_fallback = self.symbol_map[norm_addr]
-                            else: # Last resort lookup
-                                addr_obj = self.default_space.getAddress(norm_addr)
-                                if addr_obj: symbol_in_fallback = self.find_symbol_for_address(addr_obj)
-                        sanitized_symbol = self.sanitize_label_name(symbol_in_fallback) if symbol_in_fallback else None
-                        # Construct operand string, preferring symbol over hex
-                        zp_part = sanitized_symbol if sanitized_symbol else "${}".format(addr_hex)
-                        op_str = "({}),y".format(zp_part); op_str_built = True
-
-                    elif indirect_match_x:
-                        addr_hex = indirect_match_x.group(1); norm_addr = self.normalize_address_from_string(addr_hex)
-                        # Try to find a symbol for the zero-page address
-                        if norm_addr:
-                            if norm_addr in self.address_to_label: symbol_in_fallback = self.address_to_label[norm_addr]
-                            elif norm_addr in self.symbol_map: symbol_in_fallback = self.symbol_map[norm_addr]
-                            else: # Last resort lookup
-                                 addr_obj = self.default_space.getAddress(norm_addr)
-                                 if addr_obj: symbol_in_fallback = self.find_symbol_for_address(addr_obj)
-                        sanitized_symbol = self.sanitize_label_name(symbol_in_fallback) if symbol_in_fallback else None
-                        # Construct operand string, preferring symbol over hex
-                        zp_part = sanitized_symbol if sanitized_symbol else "${}".format(addr_hex)
-                        op_str = "({},x)".format(zp_part); op_str_built = True
-
-                    elif absolute_match_xy:
-                        addr_hex = absolute_match_xy.group(1); index = "," + absolute_match_xy.group(2).lower()
-                        norm_addr = self.normalize_address_from_string(addr_hex)
-                        # Try to find symbol using maps first, then fallback lookup
-                        if norm_addr:
-                            if norm_addr in self.address_to_label: symbol_in_fallback = self.address_to_label[norm_addr]
-                            elif norm_addr in self.symbol_map: symbol_in_fallback = self.symbol_map[norm_addr]
-                            else: # Last resort lookup
-                                addr_obj = self.default_space.getAddress(norm_addr)
-                                if addr_obj: symbol_in_fallback = self.find_symbol_for_address(addr_obj)
-                        sanitized_symbol = self.sanitize_label_name(symbol_in_fallback) if symbol_in_fallback else None
-                        # Construct operand string, preferring symbol over hex
-                        addr_part = sanitized_symbol if sanitized_symbol else "${}".format(addr_hex)
-                        op_str = "{}{}".format(addr_part, index); op_str_built = True
-
-                    elif absolute_match_plain:
-                        addr_hex = absolute_match_plain.group(1); index = ""
-                        norm_addr = self.normalize_address_from_string(addr_hex)
-                        # Try to find symbol using maps first, then fallback lookup
-                        if norm_addr:
-                            if norm_addr in self.address_to_label: symbol_in_fallback = self.address_to_label[norm_addr]
-                            elif norm_addr in self.symbol_map: symbol_in_fallback = self.symbol_map[norm_addr]
-                            else: # Last resort lookup
-                                addr_obj = self.default_space.getAddress(norm_addr)
-                                if addr_obj: symbol_in_fallback = self.find_symbol_for_address(addr_obj)
-                        sanitized_symbol = self.sanitize_label_name(symbol_in_fallback) if symbol_in_fallback else None
-                        # Construct operand string, preferring symbol over hex
-                        op_str = sanitized_symbol if sanitized_symbol else "${}".format(addr_hex)
+                    
+                    if offset_match:
+                        base_label = offset_match.group(1)
+                        op_sign = offset_match.group(2)
+                        offset_val_hex = offset_match.group(4) # The hex part of the offset value
+                        
+                        # Sanitize the base label
+                        sanitized_base_label = self.sanitize_label_name(base_label)
+                        
+                        # Convert the offset value from hex (group 4) to integer for clean output
+                        try:
+                            int_offset = int(offset_val_hex, 16)
+                            # Use decimal for the offset in Kick Assembler format
+                            formatted_offset = str(int_offset)
+                        except ValueError:
+                            # Fallback if parsing fails, should only happen if Ghidra's format is unexpected
+                            formatted_offset = "${}".format(offset_val_hex.upper())
+                        
+                        # Apply index suffix and finalize op_str
+                        op_str = "{}{}{}".format(sanitized_base_label, op_sign, formatted_offset) + index_suffix
                         op_str_built = True
 
-                    # If none of the regex patterns matched or built the string
+                    # --- Original Fallback Logic (Only if NEW offset logic didn't match) ---
                     if not op_str_built:
-                        # Use Ghidra's default representation, converting hex format
-                        op_str = self.convert_to_kick_hex(default_op_rep)
-                        # Ensure KickAss style indexing (lowercase)
-                        if op_str.endswith(",X"): op_str = op_str[:-2] + ",x"
-                        if op_str.endswith(",Y"): op_str = op_str[:-2] + ",y"
-                # --- End Fallback Logic ---
+                        symbol_in_fallback = None
+                        # Regex patterns to parse common 6502 addressing modes from Ghidra's string output
+                        indirect_match_y = re.match(r'\(\$?(?:0x)?([0-9A-Fa-f]+)\),Y$', default_op_rep, re.IGNORECASE) # ($HH),Y
+                        indirect_match_x = re.match(r'\(\$?(?:0x)?([0-9A-Fa-f]+),X\)$', default_op_rep, re.IGNORECASE) # ($HH,X)
+                        absolute_match_xy = re.match(r'\$?(?:0x)?([0-9A-Fa-f]+),(X|Y)$', default_op_rep, re.IGNORECASE) # $HHHH,X or $HHHH,Y
+                        absolute_match_plain = re.match(r'\$?(?:0x)?([0-9A-Fa-f]+)$', default_op_rep, re.IGNORECASE)    # $HHHH
+                        addr_hex, norm_addr = None, None # Extracted hex string and normalized version
+    
+                        if indirect_match_y:
+                            addr_hex = indirect_match_y.group(1); norm_addr = self.normalize_address_from_string(addr_hex)
+                            # Try to find a symbol for the zero-page address
+                            if norm_addr:
+                                if norm_addr in self.address_to_label: symbol_in_fallback = self.address_to_label[norm_addr]
+                                elif norm_addr in self.symbol_map: symbol_in_fallback = self.symbol_map[norm_addr]
+                                else: # Last resort lookup
+                                    addr_obj = self.default_space.getAddress(norm_addr)
+                                    if addr_obj: symbol_in_fallback = self.find_symbol_for_address(addr_obj)
+                            sanitized_symbol = self.sanitize_label_name(symbol_in_fallback) if symbol_in_fallback else None
+                            # Construct operand string, preferring symbol over hex
+                            zp_part = sanitized_symbol if sanitized_symbol else "${}".format(addr_hex)
+                            op_str = "({}),y".format(zp_part); op_str_built = True
+    
+                        elif indirect_match_x:
+                            addr_hex = indirect_match_x.group(1); norm_addr = self.normalize_address_from_string(addr_hex)
+                            # Try to find a symbol for the zero-page address
+                            if norm_addr:
+                                if norm_addr in self.address_to_label: symbol_in_fallback = self.address_to_label[norm_addr]
+                                elif norm_addr in self.symbol_map: symbol_in_fallback = self.symbol_map[norm_addr]
+                                else: # Last resort lookup
+                                     addr_obj = self.default_space.getAddress(norm_addr)
+                                     if addr_obj: symbol_in_fallback = self.find_symbol_for_address(addr_obj)
+                            sanitized_symbol = self.sanitize_label_name(symbol_in_fallback) if symbol_in_fallback else None
+                            # Construct operand string, preferring symbol over hex
+                            zp_part = sanitized_symbol if sanitized_symbol else "${}".format(addr_hex)
+                            op_str = "({},x)".format(zp_part); op_str_built = True
+    
+                        elif absolute_match_xy:
+                            addr_hex = absolute_match_xy.group(1); index = "," + absolute_match_xy.group(2).lower()
+                            norm_addr = self.normalize_address_from_string(addr_hex)
+                            # Try to find symbol using maps first, then fallback lookup
+                            if norm_addr:
+                                if norm_addr in self.address_to_label: symbol_in_fallback = self.address_to_label[norm_addr]
+                                elif norm_addr in self.symbol_map: symbol_in_fallback = self.symbol_map[norm_addr]
+                                else: # Last resort lookup
+                                    addr_obj = self.default_space.getAddress(norm_addr)
+                                    if addr_obj: symbol_in_fallback = self.find_symbol_for_address(addr_obj)
+                            sanitized_symbol = self.sanitize_label_name(symbol_in_fallback) if symbol_in_fallback else None
+                            # Construct operand string, preferring symbol over hex
+                            addr_part = sanitized_symbol if sanitized_symbol else "${}".format(addr_hex)
+                            op_str = "{}{}".format(addr_part, index); op_str_built = True
+    
+                        elif absolute_match_plain:
+                            addr_hex = absolute_match_plain.group(1); index = ""
+                            norm_addr = self.normalize_address_from_string(addr_hex)
+                            # Try to find symbol using maps first, then fallback lookup
+                            if norm_addr:
+                                if norm_addr in self.address_to_label: symbol_in_fallback = self.address_to_label[norm_addr]
+                                elif norm_addr in self.symbol_map: symbol_in_fallback = self.symbol_map[norm_addr]
+                                else: # Last resort lookup
+                                    addr_obj = self.default_space.getAddress(norm_addr)
+                                    if addr_obj: symbol_in_fallback = self.find_symbol_for_address(addr_obj)
+                            sanitized_symbol = self.sanitize_label_name(symbol_in_fallback) if symbol_in_fallback else None
+                            # Construct operand string, preferring symbol over hex
+                            op_str = sanitized_symbol if sanitized_symbol else "${}".format(addr_hex)
+                            op_str_built = True
+    
+                        # If none of the regex patterns matched or built the string
+                        if not op_str_built:
+                            # Use Ghidra's default representation, converting hex format
+                            op_str = self.convert_to_kick_hex(default_op_rep)
+                            # Ensure KickAss style indexing (lowercase)
+                            if op_str.endswith(",X"): op_str = op_str[:-2] + ",x"
+                            if op_str.endswith(",Y"): op_str = op_str[:-2] + ",y"
+                    # --- End Fallback Logic ---
 
                 # Final check if operand string is still None (shouldn't happen ideally)
                 if op_str is None:
@@ -763,13 +806,26 @@ class KickAssemblerExporter:
                 operand_strings.append(op_str)
             # --- End Operand Loop ---
 
+            # Force absolute addressing mode (.abs) when the original instruction
+            # is a 3-byte absolute form accessing a zero-page address ($00xx).
+            # Without this KickAss would assemble the shorter zero-page opcode,
+            # producing different bytes than the original binary.
+            needs_abs = (
+                instruction.getLength() == 3
+                and instruction_bytes and len(instruction_bytes) >= 3
+                and (instruction_bytes[2] & 0xff) == 0x00
+                and mnemonic in self.ZP_CAPABLE.get(index_suffix, set())
+            )
+            effective_mnemonic = (mnemonic + ".abs") if needs_abs else mnemonic
+
             # Assemble the full instruction line (mnemonic + operands)
-            kick_disasm = mnemonic.ljust(3) + (" " + ", ".join(operand_strings) if operand_strings else "")
+            kick_disasm = effective_mnemonic.ljust(3) + (" " + ", ".join(operand_strings) if operand_strings else "")
         # --- End Non-Accumulator Processing ---
 
         # --- Format and Write Output Line ---
         instruction_text = "  {}".format(kick_disasm) # Indent instruction
-
+        # ... [Rest of the formatting and writing logic remains the same] ...
+        
         EOL_COMMENT_COLUMN = self.EOL_COMMENT_COLUMN
 
         # Prepare Ghidra-generated part of the comment
