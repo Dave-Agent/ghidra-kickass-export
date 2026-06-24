@@ -451,11 +451,14 @@ class KickAssemblerExporter:
                 if norm_addr in symbols_to_write: current_priority = symbols_to_write[norm_addr]['priority']
 
                 if new_priority >= current_priority:
-                    # Overwrite or add the symbol chosen for the symbol file at this address
+                    # Overwrite or add the symbol chosen for the symbol file at this address.
+                    # Preserve any XREFs already gathered for this address so they aren't
+                    # lost when a higher-priority symbol wins the name slot.
+                    existing_xrefs = symbols_to_write[norm_addr]['xrefs'] if norm_addr in symbols_to_write else []
                     symbols_to_write[norm_addr] = {
                         'name': symbol_name,
                         'priority': new_priority,
-                        'xrefs': [] # XREFs will be added below if address hasn't been processed
+                        'xrefs': existing_xrefs
                     }
 
                 # --- Gather XREFs (only once per address, only for symbols actually included) ---
