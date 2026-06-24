@@ -129,11 +129,10 @@ MIT License - see LICENSE file for details.
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Make your changes
-4. Test with various Ghidra programs
-5. Commit your changes (`git commit -m 'Add amazing feature'`)
-6. Push to the branch (`git push origin feature/amazing-feature`)
-7. Open a Pull Request
+3. Make your changes and run the test harness (see below)
+4. Commit your changes (`git commit -m 'Add amazing feature'`)
+5. Push to the branch (`git push origin feature/amazing-feature`)
+6. Open a Pull Request
 
 ### Development Setup
 
@@ -141,12 +140,46 @@ MIT License - see LICENSE file for details.
 # Clone the repo
 git clone https://github.com/Dave-Agent/ghidra-kickass-export.git
 
-# Copy to Ghidra scripts directory
-cp KickAssemblerExport.py ~/ghidra_scripts/
-
-# Test with sample programs
-# (Include test cases in your repo)
+# Symlink the script into Ghidra's scripts directory (pick up changes without copying)
+ln -s "$(pwd)/ghidra_scripts/KickAssemblerExport.py" ~/ghidra_scripts/
 ```
+
+### Testing
+
+The test harness in `tests/` uses Ghidra headless mode to verify that changes produce identical output to the previous version, and optionally round-trips the result through KickAss.
+
+#### Prerequisites
+
+- Ghidra installed (set `GHIDRA` env var if not at the default path below)
+- KickAss.jar available (set `KICKASS` env var if not at the default path below)
+
+#### Running the tests
+
+```bash
+# Run against the bundled sample (tests/samples/hello.prg)
+./tests/test_export.sh
+
+# Run against your own PRG
+./tests/test_export.sh /path/to/your/program.prg
+
+# Override tool paths
+GHIDRA=/opt/ghidra/support/analyzeHeadless \
+KICKASS=~/tools/KickAss.jar \
+./tests/test_export.sh
+```
+
+The harness:
+1. Imports the PRG into a temporary Ghidra project and runs analysis (once, reused for both runs)
+2. Runs the `main`-branch script against the saved analysis → **BEFORE** output
+3. Runs the current branch's script against the same analysis → **AFTER** output
+4. Diffs the two outputs — they must be identical for a pure refactor
+5. Compiles the output with KickAss to verify it assembles without errors
+
+**Note:** When testing on a PRG loaded via Ghidra's Raw Binary loader, all output will be `.byte` directives since no code analysis is performed. For a more realistic test, load the binary through Ghidra's GUI first (set the correct load address and mark entry points), save the project, then point the harness at the saved project using the `-process` flag.
+
+#### Adding test samples
+
+Place `.prg` files in `tests/samples/`. The harness accepts any PRG as its first argument.
 
 ## Support
 

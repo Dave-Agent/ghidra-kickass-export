@@ -13,10 +13,11 @@
 
 set -e
 
-GHIDRA="/home/dave/ghidra/ghidra_11.3.2_PUBLIC/support/analyzeHeadless"
-KICKASS="/home/dave/tools/KickAss.jar"
-PRG="${1:-/home/dave/C64Projects/c64-hello-world/build/hello.prg}"
-SCRIPT_DIR="$(cd "$(dirname "$0")/ghidra_scripts" && pwd)"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+GHIDRA="${GHIDRA:-/home/dave/ghidra/ghidra_11.3.2_PUBLIC/support/analyzeHeadless}"
+KICKASS="${KICKASS:-/home/dave/tools/KickAss.jar}"
+PRG="${1:-$REPO_ROOT/tests/samples/hello.prg}"
+SCRIPT_DIR="$REPO_ROOT/ghidra_scripts"
 
 PROJ_DIR="/tmp/ka_test_project"
 BEFORE_DIR="/tmp/ka_test_before"
@@ -65,7 +66,7 @@ trap restore_script EXIT
 # Patch in: (a) Python 2 coding declaration for non-ASCII comments,
 #           (b) headless guard for state.getTool() which returns None outside the GUI.
 rm -f "$INSTALLED_SCRIPT"
-git -C "$(dirname "$0")" show main:ghidra_scripts/KickAssemblerExport.py \
+git -C "$REPO_ROOT" show main:ghidra_scripts/KickAssemblerExport.py \
   | python3 -c "
 import sys, re
 src = sys.stdin.read()
