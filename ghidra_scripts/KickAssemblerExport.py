@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # Ghidra Script to Export Disassembly to Kick Assembler Format
 # Includes symbol/label handling, XREFs in code and symbol file,
 # comment preservation, improved formatting, and unified byte/code processing.
@@ -696,7 +697,8 @@ class KickAssemblerExporter:
 
         options_name = "KickAssemblerExport"
         default_path = "~/ghidra_kick_assembler_exports/src"
-        self.OUTPUT_PATH = state.getTool().getOptions(options_name).getString("LastOutputPath", default_path)
+        _tool = state.getTool()  # None in headless mode
+        self.OUTPUT_PATH = _tool.getOptions(options_name).getString("LastOutputPath", default_path) if _tool else default_path
 
         self.resolver      = SymbolResolver(currentProgram)
         self.formatter     = AsmFormatter(self.resolver, self.COMMENT_COLUMN, self.EOL_COMMENT_COLUMN)
@@ -751,7 +753,9 @@ class KickAssemblerExporter:
             else:
                 self.OUTPUT_PATH = selected_path
 
-            state.getTool().getOptions(options_name).setString("LastOutputPath", self.OUTPUT_PATH)
+            _tool = state.getTool()
+            if _tool:
+                _tool.getOptions(options_name).setString("LastOutputPath", self.OUTPUT_PATH)
             print("Export path set to: {}".format(self.OUTPUT_PATH))
 
         except CancelledException:
