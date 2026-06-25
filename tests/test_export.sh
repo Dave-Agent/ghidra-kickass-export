@@ -1,57 +1,131 @@
 #!/bin/bash
 # Test harness for KickAssemblerExport.py
 #
-# Pipeline:
-#   1. Import hello.prg into a Ghidra headless project and run analysis (once)
-#   2. Run the main-branch script against the saved project  → BEFORE output
-#   3. Run the current-branch script against the same project → AFTER output
-#   4. Diff the two outputs (should be identical after a pure refactor)
-#   5. Compile the AFTER output with KickAss and compare the binary to the original PRG
+# Drives Ghidra headless to import a binary, runs both the main-branch and
+# current-branch versions of the export script against the same analysed
+# program, diffs the output (must be identical for a pure refactor / no
+# regressions), and compiles the result with KickAss.
 #
-# Usage: ./test_export.sh [prg_file]
-#   Defaults to c64-hello-world/build/hello.prg if no argument given.
+# Output is saved to tests/results/ for human review and cleared at the
+# start of each run.
+#
+# Default binary: tests/kernal.901227-03.bin
+#   The C64 Kernal ROM is copyrighted and NOT included in the repository.
+#   Place your own copy at tests/kernal.901227-03.bin (any revision works).
+#   The ROM loads at $E000 with its entry point at the same address.
+#
+# Usage:
+#   ./tests/test_export.sh [binary [load_addr [entry_addr]]]
+#
+#   binary      path to a raw binary or .prg file
+#               (default: tests/kernal.901227-03.bin)
+#   load_addr   hex load address without $ prefix  (default: E000)
+#   entry_addr  hex entry point address             (default: same as load_addr)
+#
+# Environment overrides:
+#   GHIDRA      path to Ghidra's analyzeHeadless script
+#   KICKASS     path to KickAss.jar
 
 set -e
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TESTS_DIR="$REPO_ROOT/tests"
+RESULTS_DIR="$TESTS_DIR/results"
+
 GHIDRA="${GHIDRA:-/home/dave/ghidra/ghidra_11.3.2_PUBLIC/support/analyzeHeadless}"
 KICKASS="${KICKASS:-/home/dave/tools/KickAss.jar}"
-PRG="${1:-$REPO_ROOT/tests/samples/hello.prg}"
 SCRIPT_DIR="$REPO_ROOT/ghidra_scripts"
-
-PROJ_DIR="/tmp/ka_test_project"
-BEFORE_DIR="/tmp/ka_test_before"
-AFTER_DIR="/tmp/ka_test_after"
-PROPS_BEFORE="/tmp/ka_props_before"
-PROPS_AFTER="/tmp/ka_props_after"
 GHIDRA_SCRIPTS="$HOME/ghidra_scripts"
 INSTALLED_SCRIPT="$GHIDRA_SCRIPTS/KickAssemblerExport.py"
 
-# Ghidra retains the full filename (including .prg) as the program name,
-# so the script outputs hello.prg.asm, not hello.asm.
-PRG_BASE="$(basename "$PRG")"          # hello.prg
-PRG_NAME="${PRG_BASE}"                 # used as Ghidra program name
-MAIN_ASM="${MAIN_ASM}"             # hello.prg.asm
-SYMBOLS_ASM="${SYMBOLS_ASM}"  # hello.prg_Symbols.asm
+BIN="${1:-$TESTS_DIR/kernal.901227-03.bin}"
+LOAD_ADDR="${2:-}"          # empty = auto-detect for PRG, default E000 for raw binary
+ENTRY_ADDR="${3:-}"
+PROCESSOR="6502:LE:16:default"
+
+# Derived paths inside results/
+PROJ_DIR="$RESULTS_DIR/ghidra_project"
+BEFORE_DIR="$RESULTS_DIR/before"
+AFTER_DIR="$RESULTS_DIR/after"
+PROPS_BEFORE="$RESULTS_DIR/props_before"
+PROPS_AFTER="$RESULTS_DIR/props_after"
+LOG_DIR="$RESULTS_DIR/logs"
+
+# Ghidra uses the full basename as the program name, so output files are
+# e.g. kernal.901227-03.bin.asm / kernal.901227-03.bin_Symbols.asm
+BIN_BASE="$(basename "$BIN")"
+MAIN_ASM="${BIN_BASE}.asm"
+SYMBOLS_ASM="${BIN_BASE}_Symbols.asm"
 
 echo "======================================================"
 echo " KickAssemblerExport test harness"
-echo " PRG:    $PRG"
-echo " BEFORE: $BEFORE_DIR"
-echo " AFTER:  $AFTER_DIR"
+echo " Binary:  $BIN"
+echo " Results: $RESULTS_DIR"
 echo "======================================================"
 
-# ── Setup ──────────────────────────────────────────────────
-rm -rf "$PROJ_DIR" "$BEFORE_DIR" "$AFTER_DIR" "$PROPS_BEFORE" "$PROPS_AFTER"
-mkdir -p "$PROJ_DIR" "$BEFORE_DIR" "$AFTER_DIR" "$PROPS_BEFORE" "$PROPS_AFTER"
+# ── Guard: confirm the binary exists ───────────────────────
+if [ ! -f "$BIN" ]; then
+  echo "ERROR: binary not found: $BIN"
+  if [[ "$BIN" == *kernal* ]]; then
+    echo ""
+    echo "The C64 Kernal ROM is copyrighted and not included in this repository."
+    echo "Place your own copy at:"
+    echo "  $TESTS_DIR/kernal.901227-03.bin"
+    echo ""
+    echo "Alternatively, run against the bundled sample:"
+    echo "  ./tests/test_export.sh tests/samples/hello.prg 0000"
+  fi
+  exit 1
+fi
 
-# Properties files: key format is "title approveButtonText = value"
-# (Ghidra headless concatenates ask() params with spaces as the lookup key)
+# ── Setup: clear results, recreate layout ──────────────────
+echo "Clearing results..."
+rm -rf "$PROJ_DIR" "$BEFORE_DIR" "$AFTER_DIR" \
+       "$PROPS_BEFORE" "$PROPS_AFTER" "$LOG_DIR"
+mkdir -p "$PROJ_DIR" "$BEFORE_DIR" "$AFTER_DIR" \
+         "$PROPS_BEFORE" "$PROPS_AFTER" "$LOG_DIR"
+
+# ── PRG header detection ────────────────────────────────────
+# A C64 .prg file begins with a 2-byte little-endian load address.  Ghidra's
+# Raw Binary loader takes the whole file as-is, so those 2 bytes would end up
+# as the first data in the program — shifting every address by 2 bytes.
+# Strip the header here and use the resulting raw binary for the import so the
+# content starts at byte 0 and can be relocated cleanly by setup_binary.py.
+BIN_FOR_IMPORT="$BIN"
+
+if [[ "${BIN_BASE##*.}" == "prg" ]]; then
+  # Read the 2-byte load address (little-endian)
+  LO_DEC=$(od -An -j0 -N1 -tu1 "$BIN" | tr -d ' ')
+  HI_DEC=$(od -An -j1 -N1 -tu1 "$BIN" | tr -d ' ')
+  PRG_ADDR=$(printf "%02X%02X" "$HI_DEC" "$LO_DEC")
+  if [ -z "$LOAD_ADDR" ]; then
+    LOAD_ADDR="$PRG_ADDR"
+    echo "PRG: load address \$$LOAD_ADDR read from header (override with arg 2)"
+  else
+    echo "PRG: ignoring header load address \$$PRG_ADDR; using explicit \$$LOAD_ADDR"
+  fi
+  # Strip the 2-byte header → clean raw binary; keep the same stem for naming
+  RAW_STEM="${BIN_BASE%.prg}"
+  BIN_FOR_IMPORT="$RESULTS_DIR/${RAW_STEM}.bin"
+  dd if="$BIN" of="$BIN_FOR_IMPORT" bs=1 skip=2 2>/dev/null
+  echo "PRG: stripped 2-byte header -> $(basename "$BIN_FOR_IMPORT")"
+  # Ghidra names the program after the imported file, so update ASM names
+  IMPORT_BASE="$(basename "$BIN_FOR_IMPORT")"
+  MAIN_ASM="${IMPORT_BASE}.asm"
+  SYMBOLS_ASM="${IMPORT_BASE}_Symbols.asm"
+fi
+
+# Apply defaults now that PRG auto-detection has had a chance to set LOAD_ADDR
+LOAD_ADDR="${LOAD_ADDR:-E000}"
+ENTRY_ADDR="${ENTRY_ADDR:-$LOAD_ADDR}"
+
+# Properties: key = "title approveButtonText" (Ghidra headless ask() format)
 echo "Select Export Directory Choose: = $BEFORE_DIR" > "$PROPS_BEFORE/KickAssemblerExport.properties"
 echo "Select Export Directory Choose: = $AFTER_DIR"  > "$PROPS_AFTER/KickAssemblerExport.properties"
 
-# Ghidra always finds the script via ~/ghidra_scripts (our symlink lives there).
-# Save the current symlink so we can restore it, then swap in each test version.
+# ── Script swap setup ───────────────────────────────────────
+# Ghidra finds scripts via ~/ghidra_scripts. We swap the file between runs
+# and restore via a trap so the original symlink is always recovered.
 ORIG_SYMLINK_TARGET="$(readlink "$INSTALLED_SCRIPT" 2>/dev/null || echo '')"
 restore_script() {
   if [ -n "$ORIG_SYMLINK_TARGET" ]; then
@@ -62,18 +136,16 @@ restore_script() {
 }
 trap restore_script EXIT
 
-# Install main-branch script (removes symlink, creates regular file).
-# Patch in: (a) Python 2 coding declaration for non-ASCII comments,
-#           (b) headless guard for state.getTool() which returns None outside the GUI.
+# Install the main-branch script, patching for headless compatibility:
+#   (a) UTF-8 coding declaration  — Jython requires this for non-ASCII source
+#   (b) state.getTool() guard     — returns None in headless, crashing __init__
 rm -f "$INSTALLED_SCRIPT"
 git -C "$REPO_ROOT" show main:ghidra_scripts/KickAssemblerExport.py \
   | python3 -c "
-import sys, re
+import sys
 src = sys.stdin.read()
-# (a) inject coding declaration if missing
 if '# -*- coding' not in src[:80]:
     src = '# -*- coding: utf-8 -*-\n' + src
-# (b) guard getTool() calls
 src = src.replace(
     'self.OUTPUT_PATH = state.getTool().getOptions(options_name).getString(\"LastOutputPath\", default_path)',
     '_tool = state.getTool()\n        self.OUTPUT_PATH = _tool.getOptions(options_name).getString(\"LastOutputPath\", default_path) if _tool else default_path'
@@ -84,16 +156,25 @@ src = src.replace(
 )
 print(src, end='')
 " > "$INSTALLED_SCRIPT"
-echo "Installed main-branch script (patched for headless) at $INSTALLED_SCRIPT"
+echo "Installed main-branch script at $INSTALLED_SCRIPT"
 
-# ── Step 1: Import and analyse once, save project ──────────
+# ── Step 1: Import and analyse ──────────────────────────────
 echo ""
-echo "── Step 1: Importing $PRG_NAME into Ghidra (analysis runs once) ──"
+echo "── Step 1: Importing $(basename "$BIN_FOR_IMPORT") into Ghidra (load=\$$LOAD_ADDR) ──"
+# Try to set load address via the "Raw Binary" loader.
+# If Ghidra rejects the loader name, fall back to auto-detection (loads at $0000,
+# which still produces valid diff and round-trip tests even if addresses are wrong).
+# Import the binary as a raw file (Ghidra loads it at $0000 by default).
+# tests/setup_binary.py runs as a pre-script: it relocates the block to the
+# real load address and marks 6502 entry points so auto-analysis disassembles
+# actual instructions rather than treating everything as data.
 "$GHIDRA" "$PROJ_DIR" TestKA \
-  -import "$PRG" \
-  -processor 6502:LE:16:default \
-  2>&1 | tee /tmp/ka_import.log | grep -E "INFO|WARN|ERROR|Script|Exception" || true
-echo "Import complete."
+  -import "$BIN_FOR_IMPORT" \
+  -processor "$PROCESSOR" \
+  -scriptPath "$TESTS_DIR" \
+  -preScript setup_binary.py "$LOAD_ADDR" \
+  2>&1 | tee "$LOG_DIR/import.log" | grep -E "REPORT|setup_binary|Loader|address|WARN|ERROR|Exception" || true
+echo "Import complete. See $LOG_DIR/import.log"
 
 # ── Step 2: Run main-branch script ─────────────────────────
 echo ""
@@ -103,84 +184,91 @@ echo "── Step 2: Running MAIN-branch script ──"
   -noanalysis \
   -postscript KickAssemblerExport.py \
   -propertiesPath "$PROPS_BEFORE" \
-  2>&1 | tee /tmp/ka_before.log | grep -E "INFO|WARN|ERROR|Script|Exception|Export" || true
+  2>&1 | tee "$LOG_DIR/before.log" | grep -E "REPORT|WARN|ERROR|Exception|Starting|Complete|Export path" || true
 
-if [ ! -f "$BEFORE_DIR/${PRG_NAME}.asm" ]; then
-  echo "ERROR: main-branch export did not produce ${PRG_NAME}.asm"
-  echo "Check /tmp/ka_before.log"
+if [ ! -f "$BEFORE_DIR/${MAIN_ASM}" ]; then
+  echo "ERROR: main-branch export did not produce ${MAIN_ASM}"
+  echo "See $LOG_DIR/before.log"
   exit 1
 fi
-echo "Main-branch export complete: $(ls -lh "$BEFORE_DIR/${PRG_NAME}.asm" | awk '{print $5, $9}')"
+echo "Main-branch export: $(wc -l < "$BEFORE_DIR/${MAIN_ASM}") lines — $(ls -lh "$BEFORE_DIR/${MAIN_ASM}" | awk '{print $5}')"
 
-# ── Step 3: Run refactor-branch script ─────────────────────
-# Swap in the refactor (current branch) version of the script
+# ── Step 3: Run current-branch script ──────────────────────
 rm -f "$INSTALLED_SCRIPT"
 cp "$SCRIPT_DIR/KickAssemblerExport.py" "$INSTALLED_SCRIPT"
-echo "Installed refactor-branch script at $INSTALLED_SCRIPT"
+echo "Installed current-branch script at $INSTALLED_SCRIPT"
 
 echo ""
-echo "── Step 3: Running REFACTOR-branch script ──"
+echo "── Step 3: Running CURRENT-branch script ──"
 "$GHIDRA" "$PROJ_DIR" TestKA \
   -process \
   -noanalysis \
   -postscript KickAssemblerExport.py \
   -propertiesPath "$PROPS_AFTER" \
-  2>&1 | tee /tmp/ka_after.log | grep -E "INFO|WARN|ERROR|Script|Exception|Export" || true
+  2>&1 | tee "$LOG_DIR/after.log" | grep -E "REPORT|WARN|ERROR|Exception|Starting|Complete|Export path" || true
 
-if [ ! -f "$AFTER_DIR/${PRG_NAME}.asm" ]; then
-  echo "ERROR: refactor-branch export did not produce ${PRG_NAME}.asm"
-  echo "Check /tmp/ka_after.log"
+if [ ! -f "$AFTER_DIR/${MAIN_ASM}" ]; then
+  echo "ERROR: current-branch export did not produce ${MAIN_ASM}"
+  echo "See $LOG_DIR/after.log"
   exit 1
 fi
-echo "Refactor-branch export complete: $(ls -lh "$AFTER_DIR/${PRG_NAME}.asm" | awk '{print $5, $9}')"
-# (trap will restore the symlink on exit)
+echo "Current-branch export: $(wc -l < "$AFTER_DIR/${MAIN_ASM}") lines — $(ls -lh "$AFTER_DIR/${MAIN_ASM}" | awk '{print $5}')"
 
-# ── Step 4: Diff the two ASM outputs ───────────────────────
+# ── Step 4: Diff main vs current ───────────────────────────
 echo ""
-echo "── Step 4: Diffing main vs refactor output ──"
-# Ignore the timestamp comment ("// Generated on: ...") — it varies by run time
+echo "── Step 4: Diffing main vs current output ──"
 ASM_DIFF=0
-diff -I '^// Generated on:' "$BEFORE_DIR/${MAIN_ASM}" "$AFTER_DIR/${MAIN_ASM}" || ASM_DIFF=$?
+diff -I '^// Generated on:' \
+  "$BEFORE_DIR/${MAIN_ASM}" "$AFTER_DIR/${MAIN_ASM}" \
+  > "$RESULTS_DIR/asm.diff" 2>&1 || ASM_DIFF=$?
 SYM_DIFF=0
-diff -I '^// Generated on:' "$BEFORE_DIR/${SYMBOLS_ASM}" "$AFTER_DIR/${SYMBOLS_ASM}" || SYM_DIFF=$?
+diff -I '^// Generated on:' \
+  "$BEFORE_DIR/${SYMBOLS_ASM}" "$AFTER_DIR/${SYMBOLS_ASM}" \
+  > "$RESULTS_DIR/symbols.diff" 2>&1 || SYM_DIFF=$?
 
 if [ $ASM_DIFF -eq 0 ] && [ $SYM_DIFF -eq 0 ]; then
-  echo "PASS: both output files are identical between main and refactor branches"
+  echo "PASS: output is identical between main and current branch"
 else
-  echo "FAIL: output differs between branches (ASM diff=$ASM_DIFF, Symbols diff=$SYM_DIFF)"
+  echo "FAIL: output differs (ASM diff=$ASM_DIFF  Symbols diff=$SYM_DIFF)"
+  echo "      See $RESULTS_DIR/asm.diff and $RESULTS_DIR/symbols.diff"
   exit 1
 fi
 
-# ── Step 5: Compile with KickAss and compare binary ────────
+# ── Step 5: Compile with KickAss ───────────────────────────
 echo ""
 echo "── Step 5: Compiling with KickAss ──"
-cd "$AFTER_DIR"
 KICKASS_OUT=0
-java -jar "$KICKASS" "${MAIN_ASM}" 2>&1 || KICKASS_OUT=$?
+( cd "$AFTER_DIR" && java -jar "$KICKASS" "${MAIN_ASM}" ) \
+  2>&1 | tee "$LOG_DIR/kickass.log" || KICKASS_OUT=$?
 
 if [ $KICKASS_OUT -ne 0 ]; then
-  echo "WARN: KickAss exited with code $KICKASS_OUT — assembly failed"
-  echo "(This may be expected for programs with labels outside the imported range)"
+  echo "WARN: KickAss exited with code $KICKASS_OUT"
+  echo "      See $LOG_DIR/kickass.log"
 else
-  GENERATED_PRG="$AFTER_DIR/${PRG_BASE%.prg}.prg"  # KickAss strips .prg.asm → .prg
-  if [ -f "$GENERATED_PRG" ]; then
-    # PRG files have a 2-byte load address header; skip it for the binary comparison
-    ORIG_SIZE=$(wc -c < "$PRG")
-    GEN_SIZE=$(wc -c  < "$GENERATED_PRG")
-    echo "Original PRG: ${ORIG_SIZE} bytes"
-    echo "Generated PRG: ${GEN_SIZE} bytes"
-    if cmp -s "$PRG" "$GENERATED_PRG"; then
+  # KickAss strips the last extension and adds .prg
+  # kernal.901227-03.bin.asm → kernal.901227-03.bin.prg
+  GENERATED="${AFTER_DIR}/${MAIN_ASM%.asm}.prg"   # KickAss strips last ext and adds .prg
+  if [ -f "$GENERATED" ]; then
+    ORIG_SIZE=$(wc -c < "$BIN_FOR_IMPORT")   # raw content size (no PRG header)
+    GEN_SIZE=$(wc -c  < "$GENERATED")
+    echo "Original: ${ORIG_SIZE} bytes (raw)    Generated: ${GEN_SIZE} bytes (PRG)"
+    # KickAss always writes a 2-byte load-address header; BIN_FOR_IMPORT is always
+    # a raw binary (header already stripped for .prg inputs), so skip 2 bytes from
+    # the generated file only.
+    if cmp -s --ignore-initial=2:0 "$GENERATED" "$BIN_FOR_IMPORT"; then
       echo "PASS: round-trip binary is byte-identical to original"
     else
-      echo "INFO: round-trip binary differs from original"
-      echo "      (expected for incomplete analysis — check labels and data sections)"
+      echo "INFO: round-trip binary differs — expected unless all bytes are fully disassembled"
     fi
   else
-    echo "WARN: KickAss succeeded but no .prg output file found"
+    echo "WARN: KickAss succeeded but no output .prg found (expected at $GENERATED)"
   fi
 fi
 
 echo ""
 echo "======================================================"
-echo " Done. Logs: /tmp/ka_import.log  /tmp/ka_before.log  /tmp/ka_after.log"
+echo " Done."
+echo " Output files: $AFTER_DIR/"
+echo " Diff files:   $RESULTS_DIR/*.diff"
+echo " Logs:         $LOG_DIR/"
 echo "======================================================"

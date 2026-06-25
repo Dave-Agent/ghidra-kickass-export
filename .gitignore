@@ -1,0 +1,7 @@
+CLAUDE.md
+
+# Test results — generated on each run, kept for human review but not committed
+tests/results/
+
+# Copyrighted ROM files — contributors supply their own copies
+tests/kernal.901227-03.bin

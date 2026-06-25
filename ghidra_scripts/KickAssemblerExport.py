@@ -11,7 +11,7 @@
 from java.io import File
 from ghidra.program.model.listing import CodeUnit, Instruction, Data
 from ghidra.program.model.symbol import SymbolType, Symbol, RefType
-from ghidra.program.model.address import Address, AddressOutOfBoundsException
+from ghidra.program.model.address import Address, AddressOutOfBoundsException, AddressOverflowException
 from ghidra.util.exception import CancelledException
 from ghidra.framework.preferences import Preferences
 from ghidra.program.model.scalar import Scalar
@@ -898,18 +898,21 @@ class KickAssemblerExporter:
                         if processed_length <= 0:
                             print("Warning: processed_length <= 0 at {}, advancing by 1.".format(current_address))
                             processed_length = 1
-                        try:
-                            next_address = current_address.addNoWrap(processed_length)
-                            if next_address.compareTo(current_address) < 0:
-                                print("Warning: address wrap at {}, stopping block.".format(current_address))
+                        if current_address.compareTo(end_addr) >= 0:
+                            current_address = None  # processed last address; done
+                        else:
+                            try:
+                                next_address = current_address.addNoWrap(processed_length)
+                                if next_address.compareTo(current_address) < 0:
+                                    print("Warning: address wrap at {}, stopping block.".format(current_address))
+                                    current_address = None
+                                else:
+                                    current_address = next_address
+                            except (AddressOutOfBoundsException, AddressOverflowException):
+                                current_address = None  # normal at end of 16-bit address space
+                            except Exception as addr_e:
+                                print("Error advancing address from {}: {}".format(current_address, addr_e))
                                 current_address = None
-                            else:
-                                current_address = next_address
-                        except AddressOutOfBoundsException:
-                            current_address = None
-                        except Exception as addr_e:
-                            print("Error advancing address from {}: {}".format(current_address, addr_e))
-                            current_address = None
 
                     # Flush any trailing bytes at end of block
                     self.formatter.flush_raw_bytes(raw_byte_buffer, buffer_start_address, f)

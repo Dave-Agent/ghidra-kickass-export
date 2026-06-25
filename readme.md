@@ -146,21 +146,37 @@ ln -s "$(pwd)/ghidra_scripts/KickAssemblerExport.py" ~/ghidra_scripts/
 
 ### Testing
 
-The test harness in `tests/` uses Ghidra headless mode to verify that changes produce identical output to the previous version, and optionally round-trips the result through KickAss.
+The test harness in `tests/` uses Ghidra headless mode to verify that changes produce identical output to the previous version, and optionally round-trips the result through KickAss. Results land in `tests/results/` (git-ignored) and are kept after the run for human review.
 
 #### Prerequisites
 
-- Ghidra installed (set `GHIDRA` env var if not at the default path below)
-- KickAss.jar available (set `KICKASS` env var if not at the default path below)
+- Ghidra installed (set `GHIDRA` env var if not at the default path)
+- KickAss.jar available (set `KICKASS` env var if not at the default path)
+- A C64 Kernal ROM at `tests/kernal.901227-03.bin` (see below)
+
+#### Kernal ROM
+
+The default test binary is the C64 Kernal ROM, which is copyrighted and not included in the repository. Any revision works (all are 8 KB). Place your copy at:
+
+```
+tests/kernal.901227-03.bin
+```
+
+That path is in `.gitignore` — it will not be committed.
+
+If you don't have a kernal handy, you can run against the bundled minimal sample instead (see below).
 
 #### Running the tests
 
 ```bash
-# Run against the bundled sample (tests/samples/hello.prg)
+# Default: run against tests/kernal.901227-03.bin at $E000
 ./tests/test_export.sh
 
-# Run against your own PRG
-./tests/test_export.sh /path/to/your/program.prg
+# Run against the bundled minimal sample
+./tests/test_export.sh tests/samples/hello.prg 0000
+
+# Run against any raw binary — supply load address (hex, no $)
+./tests/test_export.sh /path/to/rom.bin E000
 
 # Override tool paths
 GHIDRA=/opt/ghidra/support/analyzeHeadless \
@@ -169,17 +185,15 @@ KICKASS=~/tools/KickAss.jar \
 ```
 
 The harness:
-1. Imports the PRG into a temporary Ghidra project and runs analysis (once, reused for both runs)
-2. Runs the `main`-branch script against the saved analysis → **BEFORE** output
-3. Runs the current branch's script against the same analysis → **AFTER** output
-4. Diffs the two outputs — they must be identical for a pure refactor
-5. Compiles the output with KickAss to verify it assembles without errors
-
-**Note:** When testing on a PRG loaded via Ghidra's Raw Binary loader, all output will be `.byte` directives since no code analysis is performed. For a more realistic test, load the binary through Ghidra's GUI first (set the correct load address and mark entry points), save the project, then point the harness at the saved project using the `-process` flag.
+1. Imports the binary into a Ghidra project and runs analysis (project reused for both script runs)
+2. Runs the `main`-branch script against the saved analysis → **BEFORE** output in `tests/results/before/`
+3. Runs the current branch's script against the same analysis → **AFTER** output in `tests/results/after/`
+4. Diffs the two outputs — must be identical on `main`; divergence reveals regressions on feature branches
+5. Compiles the **AFTER** output with KickAss and reports the result
 
 #### Adding test samples
 
-Place `.prg` files in `tests/samples/`. The harness accepts any PRG as its first argument.
+Place additional raw binary or `.prg` files in `tests/samples/`. The harness accepts any file as its first argument along with an optional load address.
 
 ## Support
 
