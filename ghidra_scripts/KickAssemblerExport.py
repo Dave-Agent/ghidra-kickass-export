@@ -646,6 +646,7 @@ class SymbolFileWriter:
         with open(symbols_file, 'w') as f:
             f.write("// Symbols for: {}\n".format(program_name))
             f.write("// Generated on: {}\n".format(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            f.write("// https://github.com/Dave-Agent/ghidra-kickass-export\n")
             f.write("// Includes XREF information (R=Read, W=Write, c=Call, j=Jump, p=Pointer, d=Data)\n")
             f.write("// NOTE: Excludes symbols defined with ':' in the main assembly file.\n")
             f.write("// NOTE: Includes user-defined symbols even if outside defined memory blocks.\n\n")
@@ -725,6 +726,7 @@ class KickAssemblerExporter:
         f.write("// Disassembly of: {}\n".format(self.program_name))
         f.write("// Generated on: {}\n".format(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
         f.write("// Exported from Ghidra to Kick Assembler format\n")
+        f.write("// https://github.com/Dave-Agent/ghidra-kickass-export\n")
         if symbols_file:
             f.write("// Symbols file: {}\n".format(os.path.basename(symbols_file)))
             f.write("\n#import \"{}\"\n".format(os.path.basename(symbols_file)))
