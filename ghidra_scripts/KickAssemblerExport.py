@@ -281,8 +281,11 @@ class AsmFormatter:
             except ValueError: return '.'
         return '.'
 
-    def flush_raw_bytes(self, byte_buffer, start_addr, f):
-        """Write a buffer of raw bytes as a .byte directive with PETSCII comment."""
+    def flush_raw_bytes(self, byte_buffer, start_addr, f, eol_comment=None):
+        """Write a buffer of raw bytes as a .byte directive with PETSCII comment.
+
+        eol_comment: optional user EOL comment appended after the PETSCII annotation.
+        """
         if not byte_buffer:
             return False
         bytes_hex_list = ["${:02x}".format(b) for b in byte_buffer]
@@ -291,19 +294,43 @@ class AsmFormatter:
         addr_str       = start_addr.toString().split(':')[-1] if start_addr else "????"
         full_comment   = "[{}] {}".format(addr_str, petscii_str)
         padding        = " " * max(1, self.COMMENT_COLUMN - len(data_text) - 2)
-        f.write("{}{}{} {}\n".format(data_text, padding, "//", full_comment))
+        line_so_far    = "{}{}{} {}".format(data_text, padding, "//", full_comment)
+        if eol_comment:
+            comment_lines = [l.encode('ascii', 'ignore').decode('ascii')
+                             for l in eol_comment.splitlines()]
+            current_len = len(line_so_far)
+            padding2    = " " if current_len >= self.EOL_COMMENT_COLUMN - 1 \
+                          else " " * (self.EOL_COMMENT_COLUMN - 1 - current_len)
+            f.write(line_so_far + padding2 + comment_lines[0].strip() + "\n")
+            if len(comment_lines) > 1:
+                prefix_part1 = " " * (self.COMMENT_COLUMN - 2) + "//"
+                padding3     = " " * max(1, self.EOL_COMMENT_COLUMN - 1 - len(prefix_part1) + 2)
+                line_prefix  = prefix_part1 + padding3
+                for extra_line in comment_lines[1:]:
+                    f.write("{}{}\n".format(line_prefix, extra_line.strip()))
+        else:
+            f.write(line_so_far + "\n")
         return True
 
-    def write_multi_line_comment(self, prefix, comment, f, indent, blank_line_before=False):
-        """Write a Ghidra comment block as // lines, optionally preceded by a blank line."""
+    def write_multi_line_comment(self, prefix, comment, f, indent, blank_line_before=False, bordered=False):
+        """Write a Ghidra comment block as // lines.
+
+        bordered=True adds a separator line above and below (used for plate comments
+        to reproduce the visual border Ghidra shows in its listing view).
+        """
         if not comment:
             return
         if blank_line_before:
             f.write("\n")
+        sep = "{}// {}\n".format(indent, "-" * 60)
+        if bordered:
+            f.write(sep)
         for i, line in enumerate(comment.splitlines()):
             p = prefix if i == 0 else " " * len(prefix)
             safe_line = line.encode('ascii', 'ignore').decode('ascii')
             f.write("{}// {}{}\n".format(indent, p, safe_line))
+        if bordered:
+            f.write(sep)
 
     def write_xref_comment(self, f, xrefs, first_line, continuation_indent, line_limit):
         """Write a list of XREF tokens with line-wrapping.
@@ -381,7 +408,7 @@ class AsmFormatter:
         plate_comment  = self.listing.getComment(CodeUnit.PLATE_COMMENT, address)
         pre_comment    = self.listing.getComment(CodeUnit.PRE_COMMENT, address)
 
-        self.write_multi_line_comment("", plate_comment, f, comment_indent, blank_line_before=True)
+        self.write_multi_line_comment("", plate_comment, f, comment_indent, blank_line_before=True, bordered=True)
         self.write_multi_line_comment("", pre_comment,   f, comment_indent)
 
         mnemonic = instruction.getMnemonicString().lower()
@@ -557,7 +584,7 @@ class AsmFormatter:
                     f.write("{}{}\n".format(line_prefix, extra_line.strip()))
 
         post_comment = self.listing.getComment(CodeUnit.POST_COMMENT, address)
-        self.write_multi_line_comment("POST:  ", post_comment, f, comment_indent)
+        self.write_multi_line_comment("", post_comment, f, comment_indent)
 
 
 # ==============================================================
@@ -840,8 +867,8 @@ class KickAssemblerExporter:
                                 if self.formatter.flush_raw_bytes(raw_byte_buffer, buffer_start_address, f):
                                     raw_byte_buffer      = []
                                     buffer_start_address = None
-                                self.formatter.write_multi_line_comment("", plate_comment, f, "  ", blank_line_before=True)
-                                self.formatter.write_multi_line_comment("", pre_comment,   f, "  ", blank_line_before=True)
+                                self.formatter.write_multi_line_comment("", plate_comment, f, "  ", blank_line_before=True, bordered=True)
+                                self.formatter.write_multi_line_comment("", pre_comment,   f, "  ")
 
                         # --- Instruction ---
                         if isinstance(code_unit, Instruction):
@@ -854,41 +881,67 @@ class KickAssemblerExporter:
 
                         # --- Defined data → raw byte buffer ---
                         elif isinstance(code_unit, Data):
-                            try:
-                                temp_addr = current_address
-                                for byte_value in code_unit.getBytes():
-                                    if buffer_start_address is None:
-                                        buffer_start_address = temp_addr
-                                    raw_byte_buffer.append(byte_value & 0xff)
-                                    if len(raw_byte_buffer) >= self.formatter.MAX_RAW_BYTES_PER_LINE:
-                                        self.formatter.flush_raw_bytes(raw_byte_buffer, buffer_start_address, f)
-                                        raw_byte_buffer      = []
-                                        buffer_start_address = None
-                                    try:
-                                        temp_addr = temp_addr.addNoWrap(1)
-                                    except (AddressOutOfBoundsException, Exception):
-                                        temp_addr = None
-                                        break
-                            except Exception as e:
-                                print("Error reading Data unit at {}: {}".format(current_address, e))
-                                self.formatter.flush_raw_bytes(raw_byte_buffer, buffer_start_address, f)
-                                raw_byte_buffer      = []
-                                buffer_start_address = None
-                                f.write(" // Error processing Data unit at {}\n".format(current_address))
+                            data_eol  = listing.getComment(CodeUnit.EOL_COMMENT,  current_address)
+                            data_post = listing.getComment(CodeUnit.POST_COMMENT, current_address)
+                            if data_eol or data_post:
+                                # Flush any pending buffer, then write this unit on its own
+                                # line so the EOL/post comment can be attached to it.
+                                if self.formatter.flush_raw_bytes(raw_byte_buffer, buffer_start_address, f):
+                                    raw_byte_buffer      = []
+                                    buffer_start_address = None
+                                try:
+                                    unit_bytes = [b & 0xff for b in code_unit.getBytes()]
+                                except Exception:
+                                    unit_bytes = []
+                                self.formatter.flush_raw_bytes(unit_bytes, current_address, f, eol_comment=data_eol)
+                                if data_post:
+                                    self.formatter.write_multi_line_comment("", data_post, f, "  ")
+                            else:
+                                try:
+                                    temp_addr = current_address
+                                    for byte_value in code_unit.getBytes():
+                                        if buffer_start_address is None:
+                                            buffer_start_address = temp_addr
+                                        raw_byte_buffer.append(byte_value & 0xff)
+                                        if len(raw_byte_buffer) >= self.formatter.MAX_RAW_BYTES_PER_LINE:
+                                            self.formatter.flush_raw_bytes(raw_byte_buffer, buffer_start_address, f)
+                                            raw_byte_buffer      = []
+                                            buffer_start_address = None
+                                        try:
+                                            temp_addr = temp_addr.addNoWrap(1)
+                                        except (AddressOutOfBoundsException, Exception):
+                                            temp_addr = None
+                                            break
+                                except Exception as e:
+                                    print("Error reading Data unit at {}: {}".format(current_address, e))
+                                    self.formatter.flush_raw_bytes(raw_byte_buffer, buffer_start_address, f)
+                                    raw_byte_buffer      = []
+                                    buffer_start_address = None
+                                    f.write(" // Error processing Data unit at {}\n".format(current_address))
                             processed_length  = code_unit.getLength()
                             address_processed = True
 
                         # --- Undefined byte → raw byte buffer ---
                         if not address_processed:
+                            undef_eol  = listing.getComment(CodeUnit.EOL_COMMENT,  current_address)
+                            undef_post = listing.getComment(CodeUnit.POST_COMMENT, current_address)
                             try:
                                 byte_value = self.memory.getByte(current_address) & 0xff
-                                if buffer_start_address is None:
-                                    buffer_start_address = current_address
-                                raw_byte_buffer.append(byte_value)
-                                if len(raw_byte_buffer) >= self.formatter.MAX_RAW_BYTES_PER_LINE:
-                                    self.formatter.flush_raw_bytes(raw_byte_buffer, buffer_start_address, f)
-                                    raw_byte_buffer      = []
-                                    buffer_start_address = None
+                                if undef_eol or undef_post:
+                                    if self.formatter.flush_raw_bytes(raw_byte_buffer, buffer_start_address, f):
+                                        raw_byte_buffer      = []
+                                        buffer_start_address = None
+                                    self.formatter.flush_raw_bytes([byte_value], current_address, f, eol_comment=undef_eol)
+                                    if undef_post:
+                                        self.formatter.write_multi_line_comment("", undef_post, f, "  ")
+                                else:
+                                    if buffer_start_address is None:
+                                        buffer_start_address = current_address
+                                    raw_byte_buffer.append(byte_value)
+                                    if len(raw_byte_buffer) >= self.formatter.MAX_RAW_BYTES_PER_LINE:
+                                        self.formatter.flush_raw_bytes(raw_byte_buffer, buffer_start_address, f)
+                                        raw_byte_buffer      = []
+                                        buffer_start_address = None
                             except Exception as e:
                                 print("Error reading undefined byte at {}: {}".format(current_address, e))
                                 self.formatter.flush_raw_bytes(raw_byte_buffer, buffer_start_address, f)
