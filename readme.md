@@ -28,6 +28,7 @@ Intended for retro computing enthusiasts, ROM hackers, game preservation project
 - ✅ Unified processing of code and data sections
 - ✅ Configurable output paths with persistence
 - ✅ PETSCII comment generation for data bytes
+- ✅ Hex operand widths reflect the addressing mode: zero-page operands and symbols are written `$xx`, absolute addresses and jump/branch targets `$xxxx`, immediates `#$xx` (comments included)
 
 ## Installation
 
@@ -114,6 +115,10 @@ Unlike basic disassembly exports, this script:
 
 
 ## Changelog
+
+### Unreleased
+- Fix: an image that ends at `$FFFF` aborted the export after the last data unit (`AddressOverflowException` was not caught in the per-byte step), which lost the closing `// *** BLOCK END ***` line and anything written after it.
+- Zero-page addresses are written with two hex digits (`.label NAME = $01`, `STA $01`), absolute ones with four; the width reflects the addressing mode. Assembled bytes are unchanged.
 
 ### v1.0.0
 

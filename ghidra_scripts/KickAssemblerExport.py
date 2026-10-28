@@ -253,11 +253,36 @@ class AsmFormatter:
 
     # --- Formatting Helpers ---
 
-    def convert_to_kick_hex(self, disasm_fragment):
-        """Convert Ghidra hex format (0x...) to Kick Assembler format ($...)."""
+    # Branch mnemonics are 2 bytes long but their operand is a code ADDRESS, never a zero-page operand.
+    BRANCHES = ('bcc', 'bcs', 'beq', 'bmi', 'bne', 'bpl', 'bvc', 'bvs')
+
+    def addr_literal(self, addr_hex, instruction, mnemonic):
+        """Hex literal for an address operand with no symbol. The number of digits reflects the addressing mode:
+        a zero-page instruction (2 bytes, not a branch) gets $xx, absolute and jump/branch targets get $xxxx."""
+        try:
+            v = int(addr_hex, 16)
+        except ValueError:
+            return "$" + addr_hex
+        zero_page = (instruction.getLength() == 2 and mnemonic not in self.BRANCHES and v < 0x100)
+        return ("$%0" + ("2" if zero_page else "4") + "x") % v
+
+    def convert_to_kick_hex(self, disasm_fragment, instruction=None):
+        """Convert Ghidra hex format (0x...) to Kick Assembler format ($...).
+        With an instruction, a hex number that is a whole operand is written with the width of its addressing mode:
+        immediates and zero-page operands $xx, absolute and branch/jump targets $xxxx (offsets such as LABEL+$1 are left alone)."""
         frag = disasm_fragment
         frag = re.sub(r'#0x([0-9A-Fa-f]+)(?![0-9A-Fa-f])', r'#$\1', frag)
         frag = re.sub(r'(?<![A-Za-z0-9_])0x([0-9A-Fa-f]+)(?![0-9A-Fa-f])', r'$\1', frag)
+        if instruction is not None:
+            mnemonic = instruction.getMnemonicString().lower()
+            def _width(m):
+                v = int(m.group(2), 16)
+                if m.group(1):                                         # immediate
+                    return "#$%0" + ("2" if v <= 0xFF else "4") + "x"
+                zero_page = (instruction.getLength() == 2 and mnemonic not in self.BRANCHES and v < 0x100)
+                return "$%0" + ("2" if zero_page else "4") + "x"
+            frag = re.sub(r'(?<![A-Za-z0-9_+\-$])(#?)\$([0-9A-Fa-f]+)(?![0-9A-Fa-f])',
+                          lambda m: (_width(m) % int(m.group(2), 16)), frag)
         return frag
 
     def sanitize_label_name(self, name):
@@ -394,7 +419,7 @@ class AsmFormatter:
         address       = instruction.getAddress()
         norm_addr_str = self.resolver.normalize_address(address)
 
-        original_asm_for_comment = self.convert_to_kick_hex(instruction.toString())
+        original_asm_for_comment = self.convert_to_kick_hex(instruction.toString(), instruction)
 
         try:
             instruction_bytes = instruction.getBytes()
@@ -508,26 +533,26 @@ class AsmFormatter:
                         if indirect_match_y:
                             addr_hex = indirect_match_y.group(1)
                             sym = _lookup_symbol(addr_hex)
-                            zp_part = self.sanitize_label_name(sym) if sym else "${}".format(addr_hex)
+                            zp_part = self.sanitize_label_name(sym) if sym else self.addr_literal(addr_hex, instruction, mnemonic)
                             op_str = "({}),y".format(zp_part); op_str_built = True
 
                         elif indirect_match_x:
                             addr_hex = indirect_match_x.group(1)
                             sym = _lookup_symbol(addr_hex)
-                            zp_part = self.sanitize_label_name(sym) if sym else "${}".format(addr_hex)
+                            zp_part = self.sanitize_label_name(sym) if sym else self.addr_literal(addr_hex, instruction, mnemonic)
                             op_str = "({},x)".format(zp_part); op_str_built = True
 
                         elif absolute_match_xy:
                             addr_hex = absolute_match_xy.group(1)
                             index    = "," + absolute_match_xy.group(2).lower()
                             sym = _lookup_symbol(addr_hex)
-                            addr_part = self.sanitize_label_name(sym) if sym else "${}".format(addr_hex)
+                            addr_part = self.sanitize_label_name(sym) if sym else self.addr_literal(addr_hex, instruction, mnemonic)
                             op_str = "{}{}".format(addr_part, index); op_str_built = True
 
                         elif absolute_match_plain:
                             addr_hex = absolute_match_plain.group(1)
                             sym = _lookup_symbol(addr_hex)
-                            op_str = self.sanitize_label_name(sym) if sym else "${}".format(addr_hex)
+                            op_str = self.sanitize_label_name(sym) if sym else self.addr_literal(addr_hex, instruction, mnemonic)
                             op_str_built = True
 
                         if not op_str_built:
@@ -692,7 +717,9 @@ class SymbolFileWriter:
                     print("Warning: Symbol '{}' at {} has invalid sanitized name. Skipping.".format(data['name'], norm_addr))
                     continue
 
-                label_line = ".label {} = ${}".format(sanitized_name, norm_addr)
+                # a zero-page address (< $0100) is written with two digits, anything else with four: the width reflects the addressing mode
+                value_text = norm_addr[2:] if norm_addr.startswith("00") else norm_addr
+                label_line = ".label {} = ${}".format(sanitized_name, value_text)
                 xrefs      = data.get('xrefs', [])
 
                 if not xrefs:
@@ -909,7 +936,7 @@ class KickAssemblerExporter:
                                             buffer_start_address = None
                                         try:
                                             temp_addr = temp_addr.addNoWrap(1)
-                                        except (AddressOutOfBoundsException, Exception):
+                                        except (AddressOutOfBoundsException, AddressOverflowException, Exception):
                                             temp_addr = None
                                             break
                                 except Exception as e:
