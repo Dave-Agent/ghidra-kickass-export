@@ -219,6 +219,10 @@ When reporting issues, please include:
 - Kick Assembler by Mads Nielsen for the outstanding 6502 assembler
 - The reverse engineering community for feedback and testing
 
+## License
+
+MIT (see `LICENSE`): use it freely, all care and no responsibility, with no warranty and no liability.
+
 ------
 
 ⭐ **Star this repo** if you find it useful!
